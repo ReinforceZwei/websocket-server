@@ -9,7 +9,23 @@ namespace websocket_server
     {
         static void Main(string[] args)
         {
-            new WebsocketServer().Listen();
+            var server = new WebsocketServer();
+            
+            server.ClientConnected += onClientConnected;
+
+            server.Listen();
+        }
+
+        private static void onClientConnected(object sender, WebsocketServer.ClientConnectedEventArgs e)
+        {
+            Console.WriteLine("New client");
+            e.Client.Message += onMessage;
+        }
+
+        private static void onMessage(object sender, WebsocketClient.MessageEventArgs e)
+        {
+            Console.WriteLine(">>> " + e.Message);
+            e.Client.Send(e.Message);
         }
     }
 }
