@@ -7,6 +7,7 @@ using System.Net.Sockets;
 using System.Net;
 using System.Threading;
 using System.Collections.Specialized;
+using System.Threading.Tasks;
 
 namespace websocket_server
 {
@@ -16,30 +17,67 @@ namespace websocket_server
 
         private List<WebsocketClient> clients = new List<WebsocketClient>();
         private object clientListLock = new object();
-        private int handshakeTimeout = 5000;
+
+        private SimpleHttpServer httpServer;
+
+        public WebsocketServer(int port = 8080)
+            : this(new SimpleHttpServer(port))
+        { }
+
+        public WebsocketServer(SimpleHttpServer httpServer)
+        {
+            this.httpServer = httpServer;
+        }
 
         /// <summary>
-        /// Start listening for connection. Will block client
+        /// Start listening for connection. Will block program
         /// </summary>
         /// <param name="port"></param>
-        public void Listen(int port = 8080)
+        public void Listen()
         {
-            TcpListener tcp = new TcpListener(IPAddress.Any, port);
-            tcp.Start();
-            log.Info("Tcp listening on port " + port);
-            while (true)
+            httpServer.HttpRequestEvent += OnHttpRequest;
+            httpServer.Listen();
+        }
+
+        private void OnHttpRequest(object sender, HttpRequestEventArgs e)
+        {
+            var request = e.Request;
+            if (request.Method == "GET"
+                && request.Headers.Get("Upgrade") == "websocket"
+                && request.Headers.Get("Sec-WebSocket-Key") != null)
             {
-                var client = tcp.AcceptTcpClient();
-                log.Debug("New client connected from " + client.Client.RemoteEndPoint.ToString());
-                new Thread(new ThreadStart(() => 
+                // perform handshake
+                e.KeepAlive = true;
+                ClientHandshake(e);
+                new Task(new Action(() => 
                 {
-                    try { HandleClient(client); }
-                    catch (Exception e)
+                    try { HandleClient(e.Client); }
+                    catch (Exception err)
                     {
-                        log.Error(e.Message);
-                        log.Error(e.StackTrace);
+                        log.Error(err.Message);
+                        log.Error(err.StackTrace);
                     }
                 })).Start();
+                log.Debug("New client connected from " + e.Client.Client.RemoteEndPoint.ToString());
+            }
+            else
+            {
+                HttpRequest?.Invoke(this, e);
+            }
+        }
+
+        /// <summary>
+        /// Broadcast a message to all connected client
+        /// </summary>
+        /// <param name="message"></param>
+        public void Broadcast(string message)
+        {
+            lock (clientListLock)
+            {
+                foreach (var client in clients)
+                {
+                    client.Send(message);
+                }
             }
         }
 
@@ -49,11 +87,17 @@ namespace websocket_server
         /// <param name="client"></param>
         private void HandleClient(TcpClient client)
         {
-            if (!ClientHandshake(client))
-                return;
             var wsClient = new WebsocketClient(client);
             AddNewClient(wsClient);
             ClientConnected?.Invoke(this, new ClientConnectedEventArgs() { Client = wsClient });
+            log.Info("A client connected");
+            log.Info("Total client: " + clients.Count);
+            wsClient.DisconnectEvent += (s, e) =>
+            {
+                RemoveClient(wsClient);
+                log.Info("A client disconnected");
+                log.Info("Total client: " + clients.Count);
+            };
             // Start websocket message
             // Will block program
             wsClient.Start();
@@ -71,64 +115,40 @@ namespace websocket_server
             }
         }
 
+        private void RemoveClient(WebsocketClient client)
+        {
+            lock (clientListLock)
+            {
+                clients.Remove(client);
+            }
+        }
+
         /// <summary>
         /// Preform handshake with client
         /// </summary>
         /// <param name="client"></param>
         /// <returns></returns>
-        private bool ClientHandshake(TcpClient client)
+        private bool ClientHandshake(HttpRequestEventArgs e)
         {
             log.Debug("Do client handshaking");
-            NetworkStream stream = client.GetStream();
-            int timeout = 0;
-            while (!stream.DataAvailable)
-            {
-                timeout++;
-                if (timeout * 50 > handshakeTimeout)
-                {
-                    log.Warn("Client handshake timeout");
-                    stream.Close();
-                    stream.Dispose();
-                    return false;
-                }
-                Thread.Sleep(50);
-            }
-            //while (client.Available < 3);
-            byte[] bytes = new byte[client.Available];
-            stream.Read(bytes, 0, client.Available);
-            string requestRaw = Encoding.UTF8.GetString(bytes);
-            var request = ParseResponse(requestRaw);
-            if (request.Method == "GET"
-                && request.Headers.Get("Sec-WebSocket-Key") != null)
-            {
-                string swk = request.Headers.Get("Sec-WebSocket-Key");
-                string swka = swk + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-                byte[] swkaSha1 = System.Security.Cryptography.SHA1.Create().ComputeHash(Encoding.UTF8.GetBytes(swka));
-                string swkaSha1Base64 = Convert.ToBase64String(swkaSha1);
-                byte[] response = Encoding.UTF8.GetBytes(
-                    "HTTP/1.1 101 Switching Protocols\r\n" +
-                    "Connection: Upgrade\r\n" +
-                    "Upgrade: websocket\r\n" +
-                    "Sec-WebSocket-Accept: " + swkaSha1Base64 + "\r\n\r\n");
+            var stream = e.Client.GetStream();
+            string swk = e.Request.Headers.Get("Sec-WebSocket-Key");
+            string swka = swk + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+            byte[] swkaSha1 = System.Security.Cryptography.SHA1.Create().ComputeHash(Encoding.UTF8.GetBytes(swka));
+            string swkaSha1Base64 = Convert.ToBase64String(swkaSha1);
+            byte[] response = Encoding.UTF8.GetBytes(
+                "HTTP/1.1 101 Switching Protocols\r\n" +
+                "Connection: Upgrade\r\n" +
+                "Upgrade: websocket\r\n" +
+                "Sec-WebSocket-Accept: " + swkaSha1Base64 + "\r\n\r\n");
 
-                stream.Write(response, 0, response.Length);
-                log.Debug("Client handshaking done");
-                return true;
-            }
-            else
-            {
-                byte[] response = Encoding.UTF8.GetBytes(
-                    "HTTP/1.1 400 Bad Request\r\n" +
-                    "Connection: Close\r\n\r\n");
-                stream.Write(response, 0, response.Length);
-                stream.Close();
-                stream.Dispose();
-                log.Debug("Client handshaking fail");
-                return false;
-            }
+            stream.Write(response, 0, response.Length);
+            log.Debug("Client handshaking done");
+            return true;
         }
 
         public event EventHandler<ClientConnectedEventArgs> ClientConnected;
+        public event EventHandler<HttpRequestEventArgs> HttpRequest;
 
         public class ClientConnectedEventArgs : EventArgs
         {
@@ -136,11 +156,11 @@ namespace websocket_server
         }
 
         /// <summary>
-        /// Parse a raw response string to response object
+        /// Parse a raw request string to request object
         /// </summary>
         /// <param name="raw">raw response string</param>
         /// <returns></returns>
-        private HttpRequest ParseResponse(string raw)
+        private HttpRequest ParseRequest(string raw)
         {
             NameValueCollection headers = new NameValueCollection();
             Queue<string> msg = new Queue<string>(raw.Split(new string[] { "\r\n" }, StringSplitOptions.None));
@@ -166,17 +186,8 @@ namespace websocket_server
                 Method = method,
                 Path = path,
                 HttpVersion = httpVersion,
-                Body = body
+                Body = Encoding.UTF8.GetBytes(body)
             };
-        }
-
-        public struct HttpRequest
-        {
-            public NameValueCollection Headers;
-            public string Method;
-            public string Path;
-            public string HttpVersion;
-            public string Body;
         }
     }
 }

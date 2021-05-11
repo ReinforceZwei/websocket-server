@@ -13,7 +13,11 @@ namespace websocket_server
     {
         protected static ILogger log = new BasicLog() { DebugEnabled = true };
 
-        private int WebsocketMessageTimeout = -1;
+        /// <summary>
+        /// Use -1 for no timeout
+        /// </summary>
+        private int MessageTimeout = -1;
+        private State state;
 
         private TcpClient client;
         private NetworkStream stream;
@@ -21,6 +25,7 @@ namespace websocket_server
         {
             this.client = client;
             this.stream = client.GetStream();
+            state = State.Open; // Handshaked before creating
         }
 
         /// <summary>
@@ -33,10 +38,10 @@ namespace websocket_server
                 int timeout = 0;
                 while (!stream.DataAvailable)
                 {
-                    if (WebsocketMessageTimeout > 0)
+                    if (MessageTimeout > 0)
                     {
                         timeout++;
-                        if (timeout * 50 > WebsocketMessageTimeout)
+                        if (timeout * 50 > MessageTimeout)
                         {
                             log.Warn("Client connection timeout");
                             Close();
@@ -86,8 +91,20 @@ namespace websocket_server
         /// </summary>
         public void Close()
         {
-            stream.Close();
-            stream.Dispose();
+            if (state != State.Closed)
+            {
+                state = State.Closed;
+                stream.Close();
+                stream.Dispose();
+                DisconnectEvent?.Invoke(this, new DisconnectEventArgs());
+            }
+        }
+            
+
+        public void Disconnect()
+        {
+            // TODO: Rewrite GetFrame method to support all opcode
+            Close();
         }
 
         /// <summary>
@@ -104,6 +121,9 @@ namespace websocket_server
         /// </summary>
         public event EventHandler<MessageEventArgs> Message;
 
+        public event EventHandler<DisconnectEventArgs> DisconnectEvent; // Disconnect used as method name
+
+        // FIXME: Where to put eventargs classes?
         public class MessageEventArgs : EventArgs
         {
             /// <summary>
@@ -116,6 +136,8 @@ namespace websocket_server
             /// </summary>
             public string Message;
         }
+
+        public class DisconnectEventArgs : EventArgs { }
 
         /// <summary>
         /// Decode client data frame
@@ -164,7 +186,7 @@ namespace websocket_server
                 count++;
             }
 
-            return Encoding.ASCII.GetString(buffer, dataIndex, dataLength);
+            return Encoding.UTF8.GetString(buffer, dataIndex, dataLength);
         }
 
         /// <summary>Gets an encoded websocket frame to send to a client from a string</summary>
@@ -174,7 +196,7 @@ namespace websocket_server
         private static byte[] GetFrameFromString(string Message, Opcode Opcode = Opcode.Text)
         {
             byte[] response;
-            byte[] bytesRaw = Encoding.Default.GetBytes(Message);
+            byte[] bytesRaw = Encoding.UTF8.GetBytes(Message);
             byte[] frame = new byte[10];
 
             int indexStartRawData = -1;
