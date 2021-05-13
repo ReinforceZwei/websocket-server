@@ -45,7 +45,7 @@ namespace websocket_server
 
         private static void onMessage(object sender, WebsocketClient.MessageEventArgs e)
         {
-            Console.WriteLine(">>> " + e.Message);
+            Console.WriteLine(">>> ");// + e.Message);
             e.Client.Send(e.Message);
         }
     }

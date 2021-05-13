@@ -23,6 +23,10 @@ namespace websocket_server
         private NetworkStream stream;
         public WebsocketClient(TcpClient client)
         {
+            if (MessageTimeout > 0)
+                client.ReceiveTimeout = MessageTimeout;
+            else
+                client.ReceiveTimeout = 0;
             this.client = client;
             this.stream = client.GetStream();
             state = State.Open; // Handshaked before creating
@@ -35,6 +39,24 @@ namespace websocket_server
         {
             while (true)
             {
+                var frame = Frame.ReadFrame(client);
+
+                File.WriteAllText(@"s:\t.txt", frame.GetDataAsString());
+
+                Console.WriteLine(frame);
+
+                if (stream.DataAvailable)
+                {
+                    Console.WriteLine("After frame but more data: " + client.Available + " bytes");
+                }
+
+                if (frame.Opcode == Opcode.Text)
+                {
+                   Message?.Invoke(this, new MessageEventArgs { Message = frame.GetDataAsString(), Client = this });
+                }
+
+                continue;
+
                 int timeout = 0;
                 while (!stream.DataAvailable)
                 {
@@ -75,6 +97,8 @@ namespace websocket_server
                 */
             }
         }
+
+        
 
         /// <summary>
         /// Send string message to client
