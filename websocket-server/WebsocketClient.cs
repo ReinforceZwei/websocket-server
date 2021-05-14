@@ -106,7 +106,7 @@ namespace websocket_server
         /// <param name="message"></param>
         public void Send(string message)
         {
-            byte[] buffer = GetFrameFromString(message);
+            byte[] buffer = Frame.GetByte(Encoding.UTF8.GetBytes(message), Opcode.Text);
             SendRaw(buffer);
         }
 

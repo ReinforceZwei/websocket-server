@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net.Sockets;
 using System.Text;
@@ -118,20 +119,19 @@ namespace websocket_server
 
             if (messageLength > (ulong)client.ReceiveBufferSize)
             {
-                ulong readCount = 0;
-                int bufferSize = client.ReceiveBufferSize / 2;
-                while (readCount < messageLength)
+                byte[] data = new byte[1024];
+                using (MemoryStream ms = new MemoryStream())
                 {
-                    if ((int)(messageLength - readCount) > bufferSize)
+                    ulong totalReadCount = 0;
+                    int readCount = 0;
+                    while (totalReadCount < messageLength)
                     {
-                        stream.Read(content, (int)readCount, bufferSize);
-                        readCount += (ulong)bufferSize;
+                        readCount = stream.Read(data, 0, data.Length);
+                        totalReadCount += (ulong)readCount;
+                        ms.Write(data, 0, readCount);
                     }
-                    else
-                    {
-                        stream.Read(content, (int)readCount, (int)messageLength % bufferSize);
-                        readCount += messageLength % (ulong)bufferSize;
-                    }
+
+                    content = ms.ToArray();
                 }
             }
             else
@@ -141,7 +141,42 @@ namespace websocket_server
                 content = MaskData(maskKey, content);
 
             return new Frame(content, (Opcode)opcode, finalFrame);
+        }
+
+        public static byte[] GetByte(byte[] data, Opcode opcode)
+        {
+            List<byte> frame = new List<byte>();
+            int length = data.Length;
+
+            frame.Add((byte)(128 + (int)opcode)); // FIN & Opcode
             
+            // Mask bit & data length
+            if (length <= 125)
+            {
+                frame.Add((byte)length);
+            }
+            else if (length >= 126 && length <= 65535)
+            {
+                frame.Add(126);
+                frame.Add((byte)((length >> 8) & 255));
+                frame.Add((byte)(length & 255));
+            }
+            else
+            {
+                frame.Add(127);
+                frame.Add((byte)((length >> 56) & 255));
+                frame.Add((byte)((length >> 48) & 255));
+                frame.Add((byte)((length >> 40) & 255));
+                frame.Add((byte)((length >> 32) & 255));
+                frame.Add((byte)((length >> 24) & 255));
+                frame.Add((byte)((length >> 16) & 255));
+                frame.Add((byte)((length >> 8) & 255));
+                frame.Add((byte)(length & 255));
+            }
+
+            frame.AddRange(data);
+
+            return frame.ToArray();
         }
     }
 }
