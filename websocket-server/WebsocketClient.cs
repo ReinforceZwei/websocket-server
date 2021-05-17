@@ -6,6 +6,7 @@ using System.Net;
 using System.Net.Sockets;
 using System.IO;
 using System.Threading;
+using System.Security.Cryptography;
 
 namespace websocket_server
 {
@@ -18,6 +19,8 @@ namespace websocket_server
         /// </summary>
         private int MessageTimeout = -1;
         private State state;
+
+        private static RNGCryptoServiceProvider rngCsp = new RNGCryptoServiceProvider();
 
         private TcpClient client;
         private NetworkStream stream;
@@ -35,31 +38,78 @@ namespace websocket_server
         public WebsocketClient(string url)
         {
             Uri uri = new Uri(url);
-            if (uri.Scheme != "ws" || uri.Scheme != "wss")
+            if (uri.Scheme != "ws" && uri.Scheme != "wss")
                 throw new NotSupportedException("Expected ws or wss URL, " + uri.Scheme + " found");
             string host = uri.Host;
             string path = uri.LocalPath;
             int port = uri.Port;
             this.client = new TcpClient(host, port);
+            this.stream = client.GetStream();
             // perform client handshake
             // TODO: Handle SSL (wss protocol)
-            ClientHandshake();
+            if (ClientHandshake(host))
+            {
+                // ok
+            }
+            else
+            {
+                try
+                {
+                    client.Close();
+                }
+                catch { }
+                throw new Exception("Handshake failed");
+            }
         }
 
-        private void ClientHandshake()
+        private bool ClientHandshake(string host)
         {
+            byte[] swkBytes = new byte[16];
+            rngCsp.GetBytes(swkBytes);
+            string swk = Convert.ToBase64String(swkBytes);
             string[] request =
             {
                 "GET / HTTP/1.1\r\n",
-                "Host: ",
+                $"Host: {host}\r\n",
                 "Upgrade: websocket\r\n",
                 "Connection: Upgrade\r\n",
-                "Sec-WebSocket-Key: ", // random 16bit number base64 encoded
+                $"Sec-WebSocket-Key: {swk}\r\n", // random 16 bytes number base64 encoded
                 "Sec-WebSocket-Version: 13\r\n",
                 "\r\n",
             };
             // Use stream
+            byte[] requestBuffer = Encoding.UTF8.GetBytes(string.Join(string.Empty, request));
+            stream.Write(requestBuffer, 0, requestBuffer.Length);
+            // Wait for response
+            string responseRaw = "";
+            while (true)
+            {
+                string line = SimpleHttpServer.ReadLine(stream);
+                if (string.IsNullOrEmpty(line))
+                    break;
+                responseRaw += line + "\r\n";
+            }
+            var response = SimpleHttpClient.ParseResponse(responseRaw);
+            Console.WriteLine(response.ToString());
+            if (response.StatusCode == 101) // Switching Protocol
+            {
+                if (response.Headers.Get("Upgrade") != "websocket")
+                    throw new Exception("No upgrade header");
+                // Validate swk
+                if (string.IsNullOrEmpty(response.Headers.Get("Sec-WebSocket-Accept")))
+                    throw new Exception("No accept header");
 
+                string sswk = response.Headers.Get("Sec-WebSocket-Accept");
+                string cswk = WebsocketServer.ComputeSecWebsocketKey(swk);
+                if (sswk == cswk)
+                {
+                    return true;
+                }
+                else
+                    throw new Exception("Accept header not match");
+            }
+            else
+                throw new Exception("Unexpected status code");
         }
 
         /// <summary>
@@ -134,9 +184,17 @@ namespace websocket_server
         /// Send string message to client
         /// </summary>
         /// <param name="message"></param>
-        public void Send(string message)
+        public void Send(string message, bool mask = false)
         {
-            byte[] buffer = Frame.GetByte(Encoding.UTF8.GetBytes(message), Opcode.Text);
+            byte[] buffer;
+            if (mask)
+            {
+                byte[] maskKey = new byte[4];
+                rngCsp.GetBytes(maskKey);
+                buffer = Frame.GetByte(Encoding.UTF8.GetBytes(message), Opcode.Text, maskKey);
+            }
+            else
+                buffer = Frame.GetByte(Encoding.UTF8.GetBytes(message), Opcode.Text);
             SendRaw(buffer);
         }
 

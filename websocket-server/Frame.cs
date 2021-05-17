@@ -87,7 +87,9 @@ namespace websocket_server
             }
             int opcode = head[0] & 0b00001111;
             bool mask = (head[1] & 0b10000000) != 0;
-            ulong messageLength = (ulong)head[1] - 128;
+            ulong messageLength = head[1];
+            if (mask)
+                messageLength -= 128;
             if (messageLength == 126)
             {
                 // Following 2 bytes are length
@@ -173,6 +175,43 @@ namespace websocket_server
             }
 
             frame.AddRange(data);
+
+            return frame.ToArray();
+        }
+
+        public static byte[] GetByte(byte[] data, Opcode opcode, byte[] mask)
+        {
+            List<byte> frame = new List<byte>();
+            int length = data.Length;
+
+            frame.Add((byte)(128 + (int)opcode)); // FIN & Opcode
+
+            // Mask bit & data length
+            if (length <= 125)
+            {
+                frame.Add((byte)(length + 128)); // Mask bit to 1
+            }
+            else if (length >= 126 && length <= 65535)
+            {
+                frame.Add(126 + 128);
+                frame.Add((byte)((length >> 8) & 255));
+                frame.Add((byte)(length & 255));
+            }
+            else
+            {
+                frame.Add(127 + 128);
+                frame.Add((byte)((length >> 56) & 255));
+                frame.Add((byte)((length >> 48) & 255));
+                frame.Add((byte)((length >> 40) & 255));
+                frame.Add((byte)((length >> 32) & 255));
+                frame.Add((byte)((length >> 24) & 255));
+                frame.Add((byte)((length >> 16) & 255));
+                frame.Add((byte)((length >> 8) & 255));
+                frame.Add((byte)(length & 255));
+            }
+
+            frame.AddRange(mask);
+            frame.AddRange(MaskData(mask, data));
 
             return frame.ToArray();
         }

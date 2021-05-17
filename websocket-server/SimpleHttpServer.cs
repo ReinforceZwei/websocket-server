@@ -102,7 +102,7 @@ namespace websocket_server
         /// </summary>
         /// <param name="input">input stream</param>
         /// <returns>the line as a byte array</returns>
-        private static string ReadLine(Stream input)
+        internal static string ReadLine(Stream input)
         {
             List<byte> result = new List<byte>();
             int b = 0x00;
@@ -139,10 +139,68 @@ namespace websocket_server
             return data.ToArray();
         }
 
+        /// <summary>
+        /// Parse a raw response string to response object
+        /// </summary>
+        /// <param name="raw">raw response string</param>
+        /// <returns></returns>
+        private HttpResponse ParseResponse(string raw)
+        {
+            int statusCode;
+            string responseBody = "";
+            NameValueCollection headers = new NameValueCollection();
+            NameValueCollection cookies = new NameValueCollection();
+            if (raw.StartsWith("HTTP/1.1") || raw.StartsWith("HTTP/1.0"))
+            {
+                Queue<string> msg = new Queue<string>(raw.Split(new string[] { "\r\n" }, StringSplitOptions.None));
+                statusCode = int.Parse(msg.Dequeue().Split(' ')[1]);
+
+                while (msg.Peek() != "")
+                {
+                    string[] header = msg.Dequeue().Split(new char[] { ':' }, 2); // Split first ':' only
+                    string key = header[0].ToLower(); // Key is case-insensitive
+                    string value = header[1];
+                    if (key == "set-cookie")
+                    {
+                        string[] cookie = value.Split(';'); // cookie options are ignored
+                        string[] tmp = cookie[0].Split(new char[] { '=' }, 2); // Split first '=' only
+                        string cname = tmp[0].Trim();
+                        string cvalue = tmp[1].Trim();
+                        cookies.Add(cname, cvalue);
+                    }
+                    else
+                    {
+                        headers.Add(key, value.Trim());
+                    }
+                }
+                msg.Dequeue();
+                if (msg.Count > 0)
+                    responseBody = msg.Dequeue();
+
+                return new HttpResponse()
+                {
+                    StatusCode = statusCode,
+                    Body = responseBody,
+                    Headers = headers,
+                    Cookies = cookies
+                };
+            }
+            else
+            {
+                return new HttpResponse()
+                {
+                    StatusCode = 520, // 502 - Web Server Returned an Unknown Error
+                    Body = "",
+                    Headers = headers,
+                    Cookies = cookies
+                };
+            }
+        }
+
         public event EventHandler<HttpRequestEventArgs> HttpRequestEvent;
     }
 
-    public struct HttpRequest
+    public class HttpRequest
     {
         public NameValueCollection Headers;
         public string Method;
@@ -157,6 +215,63 @@ namespace websocket_server
             foreach (string key in Headers.AllKeys)
             {
                 sb.AppendFormat("> {0}: {1}\n", key, Headers.Get(key));
+            }
+            return sb.ToString();
+        }
+    }
+
+    /// <summary>
+    /// Basic response object
+    /// </summary>
+    public class HttpResponse
+    {
+        public int StatusCode;
+        public string Body;
+        public NameValueCollection Headers;
+        public NameValueCollection Cookies;
+
+        /// <summary>
+        /// Get an empty response object
+        /// </summary>
+        /// <returns></returns>
+        public static HttpResponse Empty()
+        {
+            return new HttpResponse()
+            {
+                StatusCode = 204, // 204 - No content
+                Body = "",
+                Headers = new NameValueCollection(),
+                Cookies = new NameValueCollection()
+            };
+        }
+
+        public override string ToString()
+        {
+            var sb = new StringBuilder();
+            sb.AppendLine("Status code: " + StatusCode);
+            sb.AppendLine("Headers:");
+            foreach (string key in Headers)
+            {
+                sb.AppendLine(string.Format("  {0}: {1}", key, Headers[key]));
+            }
+            if (Cookies.Count > 0)
+            {
+                sb.AppendLine();
+                sb.AppendLine("Cookies: ");
+                foreach (string key in Cookies)
+                {
+                    sb.AppendLine(string.Format("  {0}={1}", key, Cookies[key]));
+                }
+            }
+            if (Body != "")
+            {
+                sb.AppendLine();
+                if (Body.Length > 200)
+                {
+                    sb.AppendLine("Body: (Truncated to 200 characters)");
+                }
+                else sb.AppendLine("Body: ");
+                sb.AppendLine(Body.Length > 200 ? Body.Substring(0, 200) + "..." : Body);
             }
             return sb.ToString();
         }

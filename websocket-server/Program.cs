@@ -10,6 +10,17 @@ namespace websocket_server
     {
         static void Main(string[] args)
         {
+            var c = new WebsocketClient("ws://localhost:8080");
+            c.Message += (s, e) =>
+            {
+                Console.WriteLine(e.Message);
+            };
+            Console.WriteLine("Sending no mask");
+            c.Send("No mask", true);
+            c.Start();
+
+            Console.ReadLine();
+
             var http = new SimpleHttpServer(8080);
 
             var server = new WebsocketServer(http);
