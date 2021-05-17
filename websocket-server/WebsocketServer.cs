@@ -133,9 +133,7 @@ namespace websocket_server
             log.Debug("Do client handshaking");
             var stream = e.Client.GetStream();
             string swk = e.Request.Headers.Get("Sec-WebSocket-Key");
-            string swka = swk + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
-            byte[] swkaSha1 = System.Security.Cryptography.SHA1.Create().ComputeHash(Encoding.UTF8.GetBytes(swka));
-            string swkaSha1Base64 = Convert.ToBase64String(swkaSha1);
+            string swkaSha1Base64 = ComputeSecWebsocketKey(swk);
             byte[] response = Encoding.UTF8.GetBytes(
                 "HTTP/1.1 101 Switching Protocols\r\n" +
                 "Connection: Upgrade\r\n" +
@@ -145,6 +143,14 @@ namespace websocket_server
             stream.Write(response, 0, response.Length);
             log.Debug("Client handshaking done");
             return true;
+        }
+
+        public static string ComputeSecWebsocketKey(string secWebsocketKey)
+        {
+            string swk = secWebsocketKey;
+            string swka = swk + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+            byte[] swkaSha1 = System.Security.Cryptography.SHA1.Create().ComputeHash(Encoding.UTF8.GetBytes(swka));
+            return Convert.ToBase64String(swkaSha1);
         }
 
         public event EventHandler<ClientConnectedEventArgs> ClientConnected;

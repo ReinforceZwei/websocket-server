@@ -32,6 +32,36 @@ namespace websocket_server
             state = State.Open; // Handshaked before creating
         }
 
+        public WebsocketClient(string url)
+        {
+            Uri uri = new Uri(url);
+            if (uri.Scheme != "ws" || uri.Scheme != "wss")
+                throw new NotSupportedException("Expected ws or wss URL, " + uri.Scheme + " found");
+            string host = uri.Host;
+            string path = uri.LocalPath;
+            int port = uri.Port;
+            this.client = new TcpClient(host, port);
+            // perform client handshake
+            // TODO: Handle SSL (wss protocol)
+            ClientHandshake();
+        }
+
+        private void ClientHandshake()
+        {
+            string[] request =
+            {
+                "GET / HTTP/1.1\r\n",
+                "Host: ",
+                "Upgrade: websocket\r\n",
+                "Connection: Upgrade\r\n",
+                "Sec-WebSocket-Key: ", // random 16bit number base64 encoded
+                "Sec-WebSocket-Version: 13\r\n",
+                "\r\n",
+            };
+            // Use stream
+
+        }
+
         /// <summary>
         /// Start the message listening loop. Will block program
         /// </summary>
@@ -39,7 +69,7 @@ namespace websocket_server
         {
             while (true)
             {
-                var frame = Frame.ReadFrame(client);
+                var frame = Frame.ReadFrame(stream);
 
                 File.WriteAllText(@"s:\t.txt", frame.GetDataAsString());
 
@@ -52,7 +82,7 @@ namespace websocket_server
 
                 if (frame.Opcode == Opcode.Text)
                 {
-                   Message?.Invoke(this, new MessageEventArgs { Message = frame.GetDataAsString(), Client = this });
+                    Message?.Invoke(this, new MessageEventArgs { Message = frame.GetDataAsString(), Client = this });
                 }
 
                 continue;

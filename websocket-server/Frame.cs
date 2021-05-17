@@ -70,10 +70,8 @@ namespace websocket_server
             return decoded;
         }
 
-        public static Frame ReadFrame(TcpClient client)
+        public static Frame ReadFrame(Stream stream)
         {
-            NetworkStream stream = client.GetStream();
-
             byte[] head = new byte[2];
             stream.Read(head, 0, 2);
             bool finalFrame = (head[0] & 0b10000000) != 0; // & 0x80
@@ -117,7 +115,7 @@ namespace websocket_server
                 stream.Read(maskKey, 0, 4);
             }
 
-            if (messageLength > (ulong)client.ReceiveBufferSize)
+            if (messageLength > 1024)
             {
                 byte[] data = new byte[1024];
                 using (MemoryStream ms = new MemoryStream())
