@@ -9,6 +9,8 @@ namespace websocket_server
 {
     public class Frame
     {
+        public static readonly Frame Empty = new Frame(new byte[0]);
+
         public readonly bool FinalFrame;
         public readonly byte[] Data;
         public readonly Opcode Opcode;
@@ -134,7 +136,7 @@ namespace websocket_server
                     content = ms.ToArray();
                 }
             }
-            else
+            else if (messageLength > 0)
                 stream.Read(content, 0, (int)messageLength);
 
             if (mask)
