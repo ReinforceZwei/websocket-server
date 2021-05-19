@@ -6,6 +6,7 @@ using System.Net.Security;
 using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading.Tasks;
 
 namespace websocket_server
 {
@@ -18,7 +19,7 @@ namespace websocket_server
         }
 
         private static RNGCryptoServiceProvider rngCsp = new RNGCryptoServiceProvider();
-        private int messageTimeout = -1;
+        private int messageTimeout = 0;
         private Role role;
         private State state;
 
@@ -28,13 +29,26 @@ namespace websocket_server
         // Role is Client only
         private Uri url;
 
+        public State State { get { return state; } }
         public Stream Stream { get { return stream; } }
         public TcpClient TcpClient { get { return client; } }
+        public int MessageTimeout
+        {
+            get { return messageTimeout; }
+            set
+            {
+                messageTimeout = value;
+                if (client != null)
+                {
+                    client.ReceiveTimeout = value;
+                }
+            }
+        }
 
         public WebsocketConnection(TcpClient client, Stream stream)
         {
             role = Role.Server;
-            state = State.Connecting; // Not sure what is the state now. We dont know server create this object before or after handshake
+            state = State.Connecting;
             this.client = client;
             this.stream = stream;
         }
@@ -53,6 +67,7 @@ namespace websocket_server
             if (role == Role.Client)
             {
                 client = new TcpClient(url.Host, url.Port);
+                client.ReceiveTimeout = messageTimeout;
                 if (url.Scheme == "wss")
                 {
                     var stream = new SslStream(client.GetStream());
@@ -73,14 +88,26 @@ namespace websocket_server
             if (role == Role.Client)
             {
                 // Handshake as client
-                return HandshakeAsClient();
+                bool result = HandshakeAsClient();
+                if (result)
+                {
+                    SwitchState(State.Open);
+                    ConnectEvent?.Invoke(this, new ConnectEventArgs() { Client = this});
+                }
+                return result;
             }
             else
             {
                 // Handshake as server
                 if (clientSwk == null)
                     throw new InvalidOperationException("No client swk provided");
-                return HandshakeAsServer(clientSwk);
+                bool result = HandshakeAsServer(clientSwk);
+                if (result)
+                {
+                    SwitchState(State.Open);
+                    ConnectEvent?.Invoke(this, new ConnectEventArgs() { Client = this });
+                }
+                return result;
             }
         }
 
@@ -112,14 +139,14 @@ namespace websocket_server
                 responseRaw += line + "\r\n";
             }
             var response = SimpleHttpClient.ParseResponse(responseRaw);
-            Console.WriteLine(response.ToString());
+            //Console.WriteLine(response.ToString());
             if (response.StatusCode == 101) // Switching Protocol
             {
                 if (response.Headers.Get("Upgrade") != "websocket")
-                    throw new Exception("No upgrade header");
+                    throw new Exception("Upgrade websocket header mismatch/missing");
                 // Validate swk
                 if (string.IsNullOrEmpty(response.Headers.Get("Sec-WebSocket-Accept")))
-                    throw new Exception("No accept header");
+                    throw new Exception("Sec-WebSocket-Accept header missing");
 
                 string sswk = response.Headers.Get("Sec-WebSocket-Accept");
                 string cswk = ComputeSecWebsocketKey(swk);
@@ -128,10 +155,10 @@ namespace websocket_server
                     return true;
                 }
                 else
-                    throw new Exception("Accept header not match");
+                    throw new Exception("Sec-WebSocket-Accept header value not match");
             }
             else
-                throw new Exception("Unexpected status code");
+                throw new Exception("Unexpected response status code: " + response.StatusCode);
         }
 
         private bool HandshakeAsServer(string clientSwk)
@@ -148,12 +175,66 @@ namespace websocket_server
             return true;
         }
 
+        internal void SwitchState(State state)
+        {
+            this.state = state;
+        }
+
         internal static string ComputeSecWebsocketKey(string secWebsocketKey)
         {
             string swk = secWebsocketKey;
             string swka = swk + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
             byte[] swkaSha1 = SHA1.Create().ComputeHash(Encoding.UTF8.GetBytes(swka));
             return Convert.ToBase64String(swkaSha1);
+        }
+
+        /// <summary>
+        /// Start message receiving loop
+        /// </summary>
+        public void StartReceive()
+        {
+            while (true)
+            {
+                try
+                {
+                    var frame = ReadNextFrame();
+                    if (frame.Opcode == Opcode.ClosedConnection)
+                    {
+                        SwitchState(State.Closing);
+                        if (state == State.Open)
+                            Send(Opcode.ClosedConnection);
+                        SwitchState(State.Closed);
+                        Close();
+                        break;
+                    }
+                    else if (frame.Opcode == Opcode.Text)
+                    {
+                        Message?.Invoke(this, new TextMessageEventArgs() { Message = frame.GetDataAsString(), Client = this });
+                    }
+                    else if (frame.Opcode == Opcode.Binary)
+                    {
+                        // Currently ignored
+                    }
+                    else if (frame.Opcode == Opcode.Ping)
+                    {
+                        // TODO: Response with data if available
+                        Pong();
+                    }
+                }
+                catch (IOException) { DisconnectEvent?.Invoke(this, new DisconnectEventArgs()); }
+                catch (ObjectDisposedException) { DisconnectEvent?.Invoke(this, new DisconnectEventArgs()); }
+            }
+        }
+
+        /// <summary>
+        /// Start message receiving loop in <see cref="Task"/>
+        /// </summary>
+        public void StartReceiveAsync()
+        {
+            new Task(new Action(() =>
+            {
+                StartReceive();
+            })).Start();
         }
 
         public int Read(byte[] buffer, int offset, int count)
@@ -168,20 +249,19 @@ namespace websocket_server
 
         public Frame ReadNextFrame()
         {
-            if (TcpClient.Connected)
+            try
             {
-                try
-                {
-                    return Frame.ReadFrame(Stream);
-                }
-                catch (IOException)
-                {
-                    // Connection lost/closed
-                    return Frame.Empty;
-                }
+                return Frame.ReadFrame(Stream);
             }
-            else
-                return Frame.Empty; // Close websocket
+            catch (IOException)
+            {
+                // Connection lost/closed
+                return Frame.Empty;
+            }
+            catch (ObjectDisposedException)
+            {
+                return Frame.Empty;
+            }
         }
 
         /// <summary>
@@ -207,6 +287,15 @@ namespace websocket_server
         }
 
         /// <summary>
+        /// Send a message with empty data. Used for sending control frame
+        /// </summary>
+        /// <param name="opcode"></param>
+        private void Send(Opcode opcode)
+        {
+            Send(new byte[0], opcode);
+        }
+
+        /// <summary>
         /// Send a text message to receiver
         /// </summary>
         /// <param name="message"></param>
@@ -226,33 +315,75 @@ namespace websocket_server
 
         public void Ping()
         {
-            Send(new byte[0], Opcode.Ping);
+            Send(Opcode.Ping);
         }
 
         public void Pong()
         {
-            Send(new byte[0], Opcode.Pong);
+            Send(Opcode.Pong);
         }
 
         public void Close()
         {
-            if (TcpClient.Connected)
+            switch (state)
             {
-                try
-                {
-                    Send(new byte[0], Opcode.ClosedConnection);
-                    // Should wait for close resopnse
-                    //Thread.Sleep(200);
-                    TcpClient.Close();
-                }
-                catch (ObjectDisposedException) { }
+                case State.Connecting:
+                case State.Closed:
+                    {
+                        // Force-close tcp
+                        try
+                        {
+                            TcpClient.Close();
+                        }
+                        catch (ObjectDisposedException) { }
+                        finally
+                        {
+                            DisconnectEvent?.Invoke(this, new DisconnectEventArgs());
+                        }
+                        return;
+                    }
+                case State.Open:
+                    {
+                        // Initiate the disconnect
+                        try
+                        {
+                            Send(Opcode.ClosedConnection);
+                            SwitchState(State.Closing);
+                        }
+                        catch (ObjectDisposedException)
+                        {
+                            DisconnectEvent?.Invoke(this, new DisconnectEventArgs());
+                        }
+                        break;
+                    }
+                case State.Closing:
+                    {
+                        // ???
+                        break;
+                    }
             }
         }
 
-        //public event EventHandler<ConnectEventArgs> ConnectEvent;
+        public event EventHandler<ConnectEventArgs> ConnectEvent;
         public event EventHandler<DisconnectEventArgs> DisconnectEvent;
+        public event EventHandler<TextMessageEventArgs> Message;
     }
 
-    public class ConnectEventArgs : EventArgs { }
+    public class ConnectEventArgs : EventArgs 
+    {
+        public WebsocketConnection Client;
+    }
     public class DisconnectEventArgs : EventArgs { }
+    public class TextMessageEventArgs : EventArgs
+    {
+        /// <summary>
+        /// Client that sends this message
+        /// </summary>
+        public WebsocketConnection Client;
+
+        /// <summary>
+        /// Message content
+        /// </summary>
+        public string Message;
+    }
 }

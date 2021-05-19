@@ -13,7 +13,7 @@ namespace websocket_server
 {
     public class WebsocketServer
     {
-        protected static ILogger log = new BasicLog() { DebugEnabled = true };
+        //protected static ILogger log = new BasicLog() { DebugEnabled = true };
 
         private List<WebsocketConnection> clients = new List<WebsocketConnection>();
         private object clientListLock = new object();
@@ -39,6 +39,11 @@ namespace websocket_server
             httpServer.Listen();
         }
 
+        /// <summary>
+        /// On http request. Check for websocket upgrade header
+        /// </summary>
+        /// <param name="sender"></param>
+        /// <param name="e"></param>
         private void OnHttpRequest(object sender, HttpRequestEventArgs e)
         {
             var request = e.Request;
@@ -49,17 +54,26 @@ namespace websocket_server
                 // perform handshake
                 e.KeepAlive = true;
                 var connection = new WebsocketConnection(e.Client, e.Client.GetStream());
-                connection.Handshake(e.Request.Headers.Get("Sec-WebSocket-Key"));
-                new Task(new Action(() => 
+                if (connection.Handshake(e.Request.Headers.Get("Sec-WebSocket-Key")))
                 {
-                    try { HandleClient(connection); }
-                    catch (Exception err)
+                    new Task(new Action(() =>
                     {
-                        log.Error(err.Message);
-                        log.Error(err.StackTrace);
-                    }
-                })).Start();
-                log.Debug("New client connected from " + e.Client.Client.RemoteEndPoint.ToString());
+                        HandleClient(connection);
+                        //try {  }
+                        //catch (Exception err)
+                        //{
+                        //    log.Error(err.Message);
+                        //    log.Error(err.StackTrace);
+                        //}
+                    })).Start();
+                    //log.Debug("New client connected from " + e.Client.Client.RemoteEndPoint.ToString());
+                }
+                else
+                {
+                    byte[] response = Encoding.UTF8.GetBytes("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+                    e.Client.GetStream().Write(response, 0, response.Length);
+                    connection.Close();
+                }
             }
             else
             {
@@ -89,24 +103,18 @@ namespace websocket_server
         private void HandleClient(WebsocketConnection connection)
         {
             AddNewClient(connection);
-            ClientConnected?.Invoke(this, new ClientConnectedEventArgs() { Client = connection });
-            log.Info("A client connected");
-            log.Info("Total client: " + clients.Count);
+            OnClientConnected?.Invoke(this, new ConnectEventArgs() { Client = connection });
+
             connection.DisconnectEvent += (s, e) =>
             {
                 RemoveClient(connection);
-                log.Info("A client disconnected");
-                log.Info("Total client: " + clients.Count);
+                OnClientDisconnected?.Invoke(this, e);
             };
+
+            connection.Message += (s, e) => { OnTextMessage?.Invoke(this, e); };
+
             // Start websocket message
-            while (true)
-            {
-                var frame = connection.ReadNextFrame();
-                if (frame.Opcode == Opcode.Text)
-                {
-                    Message?.Invoke(this, new ClientMessageEventArgs() { Message = frame.GetDataAsString(), Client = connection });
-                }
-            }
+            connection.StartReceive();
         }
 
         /// <summary>
@@ -129,19 +137,9 @@ namespace websocket_server
             }
         }
 
-        public event EventHandler<ClientConnectedEventArgs> ClientConnected;
+        public event EventHandler<ConnectEventArgs> OnClientConnected;
+        public event EventHandler<DisconnectEventArgs> OnClientDisconnected;
         public event EventHandler<HttpRequestEventArgs> HttpRequest;
-        public event EventHandler<ClientMessageEventArgs> Message;
-
-        public class ClientConnectedEventArgs : EventArgs
-        {
-            public WebsocketConnection Client;
-        }
-
-        public class ClientMessageEventArgs : EventArgs
-        {
-            public string Message;
-            public WebsocketConnection Client;
-        }
+        public event EventHandler<TextMessageEventArgs> OnTextMessage;
     }
 }

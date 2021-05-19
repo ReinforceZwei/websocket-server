@@ -10,28 +10,31 @@ namespace websocket_server
     {
         static void Main(string[] args)
         {
-            if (false)
+            if (true)
             {
                 var c = new WebsocketClient("ws://localhost:8080");
-                c.Message += (s, e) =>
+                c.OnMessage += (s, e) =>
                 {
                     Console.WriteLine(e.Message);
                 };
                 c.Connect();
                 Console.WriteLine("Sending no mask");
                 c.Send("No mask");
-                c.Ping();
+                //c.Ping();
 
-                Console.ReadLine();
+                while (true)
+                {
+                    c.Send(Console.ReadLine());
+                }
             }
 
             var http = new SimpleHttpServer(8080);
 
             var server = new WebsocketServer(http);
             
-            server.ClientConnected += onClientConnected;
+            server.OnClientConnected += onClientConnected;
             server.HttpRequest += Http_HttpRequestEvent;
-            server.Message += onMessage;
+            server.OnTextMessage += onMessage;
 
             new Thread(new ThreadStart(() => { server.Listen(); })).Start();
 
@@ -53,15 +56,15 @@ namespace websocket_server
             stream.Write(data, 0, data.Length);
         }
 
-        private static void onClientConnected(object sender, WebsocketServer.ClientConnectedEventArgs e)
+        private static void onClientConnected(object sender, ConnectEventArgs e)
         {
             Console.WriteLine("New client");
             //e.Client.Message += onMessage;
         }
 
-        private static void onMessage(object sender, WebsocketServer.ClientMessageEventArgs e)
+        private static void onMessage(object sender, TextMessageEventArgs e)
         {
-            Console.WriteLine(">>> ");// + e.Message);
+            Console.WriteLine(">>> " + e.Message);
             e.Client.Send(e.Message);
         }
     }

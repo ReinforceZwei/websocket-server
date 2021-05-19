@@ -112,7 +112,7 @@ namespace websocket_server
             byte[] content = new byte[messageLength];
             byte[] maskKey = new byte[4];
 
-            Console.WriteLine("message length: " + messageLength + " byte array length: " + content.Length);
+            //Console.WriteLine("message length: " + messageLength + " byte array length: " + content.Length);
 
             if (mask)
             {

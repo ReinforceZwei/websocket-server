@@ -15,7 +15,7 @@ namespace websocket_server
     {
         protected static ILogger log = new BasicLog() { DebugEnabled = true };
 
-        WebsocketConnection connection;
+        private WebsocketConnection connection;
         
         public WebsocketClient(string url)
         {
@@ -23,47 +23,16 @@ namespace websocket_server
             if (uri.Scheme != "ws" && uri.Scheme != "wss")
                 throw new NotSupportedException("Expected ws or wss URL, " + uri.Scheme + " found");
             connection = new WebsocketConnection(uri);
+            connection.Message += MessageHandler;
+            connection.DisconnectEvent += DisconnectHandler;
         }
 
         public void Connect()
         {
             connection.Connect();
-            if (connection.Handshake())
-            {
-                new Task(new Action(() =>
-                {
-                    Start();
-                })).Start();
-            }
+            connection.Handshake();
+            connection.StartReceiveAsync();
         }
-
-
-        /// <summary>
-        /// Start the message listening loop. Will block program
-        /// </summary>
-        public void Start()
-        {
-            while (true)
-            {
-                var frame = connection.ReadNextFrame();
-
-                //File.WriteAllText(@"s:\t.txt", frame.GetDataAsString());
-
-                Console.WriteLine(frame);
-
-                //if (stream.DataAvailable)
-                //{
-                //    Console.WriteLine("After frame but more data: " + client.Available + " bytes");
-                //}
-
-                if (frame.Opcode == Opcode.Text)
-                {
-                    Message?.Invoke(this, new MessageEventArgs { Message = frame.GetDataAsString(), Client = this });
-                }
-            }
-        }
-
-        
 
         /// <summary>
         /// Send string message to client
@@ -80,41 +49,31 @@ namespace websocket_server
         }
 
         /// <summary>
-        /// Close the TCP connection
+        /// Close the connection
         /// </summary>
         public void Close()
         {
-            // TODO: Handle close
             connection.Close();
-            DisconnectEvent?.Invoke(this, new DisconnectEventArgs());
         }
-            
 
-        public void Disconnect()
+        private void MessageHandler(object sender, TextMessageEventArgs e)
         {
-            // TODO: Rewrite GetFrame method to support all opcode
-            Close();
+            OnMessage?.Invoke(this, e);
+        }
+
+        private void DisconnectHandler(object sender, DisconnectEventArgs e)
+        {
+            OnDisconnect?.Invoke(this, e);
         }
 
         /// <summary>
         /// Fires on client message received
         /// </summary>
-        public event EventHandler<MessageEventArgs> Message;
+        public event EventHandler<TextMessageEventArgs> OnMessage;
 
-        public event EventHandler<DisconnectEventArgs> DisconnectEvent; // Disconnect used as method name
-
-        // FIXME: Where to put eventargs classes?
-        public class MessageEventArgs : EventArgs
-        {
-            /// <summary>
-            /// Client that sends this message
-            /// </summary>
-            public WebsocketClient Client;
-
-            /// <summary>
-            /// Message content
-            /// </summary>
-            public string Message;
-        }
+        /// <summary>
+        /// Firese on client disconnected
+        /// </summary>
+        public event EventHandler<DisconnectEventArgs> OnDisconnect;
     }
 }
