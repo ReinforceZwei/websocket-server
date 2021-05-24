@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using System.Net.Security;
 using System.Net.Sockets;
@@ -215,6 +216,313 @@ namespace websocket_server
             }
             string result = sb.ToString();
             return result.Remove(result.Length - 2); // Remove "; " at the end
+        }
+
+        /// <summary>
+        /// Do an HTTP request with the provided custom HTTP readers
+        /// </summary>
+        /// <param name="host">Host to connect to (eg my.site.com)</param>
+        /// <param name="port">Port to connect to (usually port 80)</param>
+        /// <param name="requestHeaders">HTTP headers</param>
+        /// <param name="requestBody">Request body, eg in case of POST request</param>
+        /// <returns>Request result, as a byte array, already un-gzipped if compressed</returns>
+        public static HTTPRequestResult DoRequest(string host, IEnumerable<string> requestHeaders, int port = 80, byte[] requestBody = null)
+        {
+            //Connect to remote host
+            TcpClient client = new TcpClient(host, port);
+            Stream stream = client.GetStream();
+
+            //Prepare HTTP headers
+            byte[] headersRaw = Encoding.ASCII.GetBytes(String.Join("\r\n", requestHeaders.ToArray()) + "\r\n\r\n");
+
+            //Using HTTPS ?
+            if (port == 443)
+            {
+                //Authenticate Host / Mono users will need to run mozroots once
+                SslStream ssl = new SslStream(client.GetStream());
+                ssl.AuthenticateAsClient(host);
+                stream = ssl;
+
+                //Build and send headers
+                ssl.Write(headersRaw);
+
+                //Send body if there is a body to send
+                if (requestBody != null)
+                {
+                    ssl.Write(requestBody);
+                    ssl.Flush();
+                }
+            }
+            else //HTTP
+            {
+                //Build and send headers
+                client.Client.Send(headersRaw);
+
+                //Send body if there is a body to send
+                if (requestBody != null)
+                    client.Client.Send(requestBody);
+            }
+
+            //Read response headers
+            string statusLine = Encoding.ASCII.GetString(ReadLine(stream));
+            if (statusLine.StartsWith("HTTP/1.1"))
+            {
+                int responseStatusCode = 0;
+                string[] statusSplitted = statusLine.Split(' ');
+                if (statusSplitted.Length == 3 && int.TryParse(statusSplitted[1], out responseStatusCode))
+                {
+                    //Response is a valid HTTP response, read all headers
+                    NameValueCollection responseHeaders = new NameValueCollection();
+                    byte[] responseBody = null;
+                    string line = "";
+                    do
+                    {
+                        line = Encoding.ASCII.GetString(ReadLine(stream));
+                        if (line.Length > 0)
+                        {
+                            string[] header = line.Split(new char[] { ':' }, 2); // Split first ':' only
+                            string key = header[0].ToLower(); // Key is case-insensitive
+                            string value = header[1];
+                            responseHeaders.Add(key, value.Trim());
+                        }
+                    } while (line.Length > 0);
+
+                    //Read response length
+                    int responseLength = -1;
+                    try
+                    {
+                        string lengthStr = responseHeaders.Get("Content-Length");
+                        if (!String.IsNullOrEmpty(lengthStr)) { responseLength = int.Parse(lengthStr); }
+                    }
+                    catch { }
+
+                    //Then, read response body
+                    if (responseHeaders.Get("Transfer-Encoding") == "chunked")
+                    {
+                        //Chunked data in several sends
+                        List<byte> responseBuffer = new List<byte>();
+                        int chunkLength = 0;
+                        do
+                        {
+                            //Read all data chunk by chunk, first line is length, second line is data
+                            string headerLine = Encoding.ASCII.GetString(ReadLine(stream));
+                            bool lengthConverted = true;
+                            try { chunkLength = Convert.ToInt32(headerLine, 16); }
+                            catch (FormatException) { lengthConverted = false; }
+                            if (lengthConverted)
+                            {
+                                int dataRead = 0;
+                                while (dataRead < chunkLength)
+                                {
+                                    byte[] chunkContent = ReadLine(stream);
+                                    dataRead += chunkContent.Length;
+                                    responseBuffer.AddRange(chunkContent);
+                                    if (dataRead < chunkLength)
+                                    {
+                                        //The chunk contains \r\n
+                                        responseBuffer.Add((byte)'\r');
+                                        responseBuffer.Add((byte)'\n');
+                                        dataRead += 2;
+                                    }
+                                }
+                            }
+                            else
+                            {
+                                //Bad chunk length, invalid response
+                                return new HTTPRequestResult()
+                                {
+                                    Status = 502,
+                                    Headers = responseHeaders,
+                                    Body = null
+                                };
+                            }
+                            //Last chunk is empty
+                        } while (chunkLength > 0);
+                        responseBody = responseBuffer.ToArray();
+                    }
+                    else if (responseLength > -1)
+                    {
+                        //Full data in one send
+                        int receivedLength = 0;
+                        byte[] received = new byte[responseLength];
+                        while (receivedLength < responseLength)
+                            receivedLength += stream.Read(received, receivedLength, responseLength - receivedLength);
+                        responseBody = received;
+                    }
+                    else if (responseHeaders.Get("Connection") == "close")
+                    {
+                        //Connection close, full read is possible
+                        responseBody = ReadFully(stream);
+                    }
+                    else
+                    {
+                        //Cannot handle keep-alive without content length.
+                        return new HTTPRequestResult()
+                        {
+                            Status = 417,
+                            Headers = null,
+                            Body = null
+                        };
+                    }
+
+                    //Decompress gzipped data if necessary
+                    if (responseHeaders.Get("Content-Encoding") == "gzip")
+                    {
+                        MemoryStream inputStream = new MemoryStream(responseBody, false);
+                        GZipStream decomp = new GZipStream(inputStream, CompressionMode.Decompress);
+                        byte[] decompressed = ReadFully(decomp);
+                        responseBody = decompressed;
+                    }
+
+                    //Finally, return the result :)
+                    return new HTTPRequestResult()
+                    {
+                        Status = responseStatusCode,
+                        Headers = responseHeaders,
+                        Body = responseBody
+                    };
+                }
+            }
+
+            //Invalid response, service is anavailable
+            return new HTTPRequestResult()
+            {
+                Status = 503,
+                Headers = null,
+                Body = null
+            };
+        }
+
+        /// <summary>
+        /// Read a line, \r\n ended, char by char from a stream, without consuming more bytes.
+        /// </summary>
+        /// <param name="input">input stream</param>
+        /// <returns>the line as a byte array</returns>
+        internal static byte[] ReadLine(Stream input)
+        {
+            List<byte> result = new List<byte>();
+            int b = 0x00;
+            while (true)
+            {
+                b = input.ReadByte();
+                if (b == '\r')
+                {
+                    int c = input.ReadByte();
+                    if (c == '\n')
+                    {
+                        break;
+                    }
+                    else
+                    {
+                        result.Add((byte)b);
+                        result.Add((byte)c);
+                    }
+                }
+                else result.Add((byte)b);
+            }
+            return result.ToArray();
+        }
+
+        /// <summary>
+        /// Read all the data from a stream to a byte array
+        /// </summary>
+        private static byte[] ReadFully(Stream input)
+        {
+            byte[] buffer = new byte[16 * 1024];
+            using (MemoryStream ms = new MemoryStream())
+            {
+                int read;
+                while ((read = input.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    ms.Write(buffer, 0, read);
+                }
+                return ms.ToArray();
+            }
+        }
+
+        /// <summary>
+        /// Represents an HTTP request result
+        /// </summary>
+        public class HTTPRequestResult
+        {
+            /// <summary>
+            /// HTTP status code of the response
+            /// </summary>
+            public int Status { get; set; }
+
+            /// <summary>
+            /// HTTP headers of the response
+            /// </summary>
+            public NameValueCollection Headers { get; set; }
+
+            /// <summary>
+            /// Body of the response, as byte array
+            /// </summary>
+            public byte[] Body { get; set; }
+
+            /// <summary>
+            /// Quick check of response status
+            /// </summary>
+            public bool Successfull
+            {
+                get
+                {
+                    return Headers != null && Status == 200;
+                }
+            }
+
+            /// <summary>
+            /// Quick check if response has been received
+            /// </summary>
+            public bool HasResponded
+            {
+                get
+                {
+                    return Headers != null && Body != null;
+                }
+            }
+
+            /// <summary>
+            /// Get response body as string
+            /// </summary>
+            public string BodyAsString
+            {
+                get
+                {
+                    return Encoding.UTF8.GetString(Body);
+                }
+            }
+
+            /// <summary>
+            /// Get cookies that server sent along with the response
+            /// </summary>
+            public IEnumerable<KeyValuePair<string, string>> NewCookies
+            {
+                get
+                {
+                    var cookies = new List<KeyValuePair<string, string>>();
+                    foreach (string header in Headers)
+                    {
+                        if (header.StartsWith("Set-Cookie: "))
+                        {
+                            string[] headerSplitted = header.Split(' ');
+                            if (headerSplitted.Length > 1)
+                            {
+                                string[] cookieSplitted = headerSplitted[1].Split(';');
+                                foreach (string cookie in cookieSplitted)
+                                {
+                                    string[] keyValue = cookie.Split('=');
+                                    if (keyValue.Length == 2)
+                                    {
+                                        cookies.Add(new KeyValuePair<string, string>(keyValue[0], keyValue[1]));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return cookies;
+                }
+            }
         }
 
         /// <summary>

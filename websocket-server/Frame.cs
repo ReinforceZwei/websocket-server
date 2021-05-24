@@ -15,6 +15,25 @@ namespace websocket_server
         public readonly byte[] Data;
         public readonly Opcode Opcode;
 
+        public string DataAsString
+        {
+            get
+            {
+                return Encoding.UTF8.GetString(Data);
+            }
+        }
+
+        public int? CloseStatusCode
+        {
+            get
+            {
+                if (Opcode == Opcode.ClosedConnection && Data.Length >= 2)
+                    return BitConverter.ToInt16(new byte[2] { Data[1], Data[0] }, 0);
+                else
+                    return null;
+            }
+        }
+
         public Frame(Opcode opcode)
         {
             Opcode = opcode;
@@ -41,6 +60,7 @@ namespace websocket_server
             FinalFrame = finalFrame;
         }
 
+        [Obsolete("GetDataAsString method is deprecated, please use DataAsString property.")]
         public string GetDataAsString()
         {
             return Encoding.UTF8.GetString(Data);
@@ -95,7 +115,7 @@ namespace websocket_server
             if (messageLength == 126)
             {
                 // Following 2 bytes are length
-                Console.WriteLine("2 bytes length");
+                //Console.WriteLine("2 bytes length");
                 byte[] length = new byte[2];
                 stream.Read(length, 0, 2);
                 messageLength = BitConverter.ToUInt16(length.Reverse().ToArray(), 0);
@@ -103,7 +123,7 @@ namespace websocket_server
             else if (messageLength == 127)
             {
                 // Following 8 bytes are length
-                Console.WriteLine("8 bytes length");
+                //Console.WriteLine("8 bytes length");
                 byte[] length = new byte[8];
                 stream.Read(length, 0, 8);
                 messageLength = BitConverter.ToUInt64(length.Reverse().ToArray(), 0);

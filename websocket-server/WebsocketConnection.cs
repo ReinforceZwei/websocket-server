@@ -22,6 +22,7 @@ namespace websocket_server
         private int messageTimeout = 0;
         private Role role;
         private State state;
+        private object sendLock = new object();
 
         private TcpClient client;
         private Stream stream;
@@ -71,7 +72,8 @@ namespace websocket_server
                 if (url.Scheme == "wss")
                 {
                     var stream = new SslStream(client.GetStream());
-                    stream.AuthenticateAsClient(url.Host);
+                    System.Security.Cryptography.X509Certificates.X509Certificate2Collection xc = new System.Security.Cryptography.X509Certificates.X509Certificate2Collection();
+                    stream.AuthenticateAsClient(url.Host, xc, System.Security.Authentication.SslProtocols.Tls, false);
                     this.stream = stream;
                 }
                 else
@@ -118,7 +120,7 @@ namespace websocket_server
             string swk = Convert.ToBase64String(swkBytes);
             string[] request =
             {
-                "GET / HTTP/1.1\r\n",
+                $"GET {url.PathAndQuery} HTTP/1.1\r\n",
                 $"Host: {url.Host}\r\n",
                 "Upgrade: websocket\r\n",
                 "Connection: Upgrade\r\n",
@@ -200,16 +202,23 @@ namespace websocket_server
                     var frame = ReadNextFrame();
                     if (frame.Opcode == Opcode.ClosedConnection)
                     {
-                        SwitchState(State.Closing);
                         if (state == State.Open)
-                            Send(Opcode.ClosedConnection);
+                        {
+                            SwitchState(State.Closing);
+                            if (frame.Data.Length > 0)
+                            {
+                                Send(frame.Data, Opcode.ClosedConnection); // Echo back data
+                            }
+                            else 
+                                Send(Opcode.ClosedConnection);
+                        }
                         SwitchState(State.Closed);
                         Close();
                         break;
                     }
                     else if (frame.Opcode == Opcode.Text)
                     {
-                        Message?.Invoke(this, new TextMessageEventArgs() { Message = frame.GetDataAsString(), Client = this });
+                        Message?.Invoke(this, new TextMessageEventArgs() { Message = frame.DataAsString, Client = this });
                     }
                     else if (frame.Opcode == Opcode.Binary)
                     {
@@ -217,8 +226,10 @@ namespace websocket_server
                     }
                     else if (frame.Opcode == Opcode.Ping)
                     {
-                        // TODO: Response with data if available
-                        Pong();
+                        if (frame.Data.Length > 0)
+                            Send(frame.Data, Opcode.Pong);
+                        else 
+                            Pong();
                     }
                 }
                 catch (IOException) { DisconnectEvent?.Invoke(this, new DisconnectEventArgs()); }
@@ -244,7 +255,10 @@ namespace websocket_server
 
         public void Write(byte[] buffer, int offset, int count)
         {
-            stream.Write(buffer, offset, count);
+            lock (sendLock)
+            {
+                stream.Write(buffer, offset, count);
+            }
         }
 
         public Frame ReadNextFrame()
