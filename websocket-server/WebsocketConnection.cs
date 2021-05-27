@@ -46,6 +46,11 @@ namespace websocket_server
             }
         }
 
+        /// <summary>
+        /// Create a new <see cref="WebsocketConnection"/> representing a server side connection (S to C)
+        /// </summary>
+        /// <param name="client"><see cref="System.Net.Sockets.TcpClient"/> of the client</param>
+        /// <param name="stream"><see cref="SslStream"/> for SSL connection or <see cref="NetworkStream"/> for plain connection</param>
         public WebsocketConnection(TcpClient client, Stream stream)
         {
             role = Role.Server;
@@ -54,6 +59,10 @@ namespace websocket_server
             this.stream = stream;
         }
 
+        /// <summary>
+        /// Create a new <see cref="WebsocketConnection"/> representing a client side connection (C to S)
+        /// </summary>
+        /// <param name="url"></param>
         public WebsocketConnection(Uri url)
         {
             role = Role.Client;
@@ -63,6 +72,9 @@ namespace websocket_server
                 throw new InvalidOperationException("Expected ws or wss URL, " + this.url.Scheme + " found");
         }
 
+        /// <summary>
+        /// Create Tcp connection to receiver
+        /// </summary>
         public void Connect()
         {
             if (role == Role.Client)
@@ -85,6 +97,11 @@ namespace websocket_server
                 throw new InvalidOperationException("Role is not client");
         }
 
+        /// <summary>
+        /// Perform handshake with receiver
+        /// </summary>
+        /// <param name="clientSwk">Client swk. Required as a server in order to handshake with client</param>
+        /// <returns></returns>
         public bool Handshake(string clientSwk = null)
         {
             if (role == Role.Client)
@@ -213,12 +230,13 @@ namespace websocket_server
                                 Send(Opcode.ClosedConnection);
                         }
                         SwitchState(State.Closed);
+                        DisconnectEvent?.Invoke(this, new DisconnectEventArgs() { Code = frame.CloseStatusCode ?? -1 });
                         Close();
                         break;
                     }
                     else if (frame.Opcode == Opcode.Text)
                     {
-                        Message?.Invoke(this, new TextMessageEventArgs() { Message = frame.DataAsString, Client = this });
+                        TextMessage?.Invoke(this, new TextMessageEventArgs() { Message = frame.DataAsString, Client = this });
                     }
                     else if (frame.Opcode == Opcode.Binary)
                     {
@@ -248,34 +266,44 @@ namespace websocket_server
             })).Start();
         }
 
+        /// <summary>
+        /// Read bytes from connection stream
+        /// </summary>
+        /// <param name="buffer"></param>
+        /// <param name="offset"></param>
+        /// <param name="count"></param>
+        /// <returns>Number of bytes read</returns>
         public int Read(byte[] buffer, int offset, int count)
         {
             return stream.Read(buffer, offset, count);
         }
 
+        /// <summary>
+        /// Write bytes to the connection stream
+        /// </summary>
+        /// <param name="buffer"></param>
+        /// <param name="offset"></param>
+        /// <param name="count"></param>
         public void Write(byte[] buffer, int offset, int count)
         {
             lock (sendLock)
             {
-                stream.Write(buffer, offset, count);
+                try
+                {
+                    stream.Write(buffer, offset, count);
+                }
+                catch (IOException) { DisconnectEvent?.Invoke(this, new DisconnectEventArgs()); Close(); }
+                catch (ObjectDisposedException) { DisconnectEvent?.Invoke(this, new DisconnectEventArgs()); }
             }
         }
 
+        /// <summary>
+        /// Read next message frame from connection
+        /// </summary>
+        /// <returns><see cref="Frame"/></returns>
         public Frame ReadNextFrame()
         {
-            try
-            {
-                return Frame.ReadFrame(Stream);
-            }
-            catch (IOException)
-            {
-                // Connection lost/closed
-                return Frame.Empty;
-            }
-            catch (ObjectDisposedException)
-            {
-                return Frame.Empty;
-            }
+            return Frame.ReadFrame(Stream);
         }
 
         /// <summary>
@@ -304,7 +332,7 @@ namespace websocket_server
         /// Send a message with empty data. Used for sending control frame
         /// </summary>
         /// <param name="opcode"></param>
-        private void Send(Opcode opcode)
+        public void Send(Opcode opcode)
         {
             Send(new byte[0], opcode);
         }
@@ -327,17 +355,27 @@ namespace websocket_server
             Send(data, Opcode.Binary);
         }
 
+        /// <summary>
+        /// Send a ping message to receiver
+        /// </summary>
         public void Ping()
         {
             Send(Opcode.Ping);
         }
 
+        /// <summary>
+        /// Send a pong message to receiver
+        /// </summary>
         public void Pong()
         {
             Send(Opcode.Pong);
         }
 
-        public void Close()
+        /// <summary>
+        /// Send disconnect message to receiver and close the connection
+        /// </summary>
+        /// <param name="code">Status code</param>
+        public void Disconnect(int code = 1000)
         {
             switch (state)
             {
@@ -345,15 +383,8 @@ namespace websocket_server
                 case State.Closed:
                     {
                         // Force-close tcp
-                        try
-                        {
-                            TcpClient.Close();
-                        }
-                        catch (ObjectDisposedException) { }
-                        finally
-                        {
-                            DisconnectEvent?.Invoke(this, new DisconnectEventArgs());
-                        }
+                        Close();
+                        DisconnectEvent?.Invoke(this, new DisconnectEventArgs());
                         return;
                     }
                 case State.Open:
@@ -361,7 +392,8 @@ namespace websocket_server
                         // Initiate the disconnect
                         try
                         {
-                            Send(Opcode.ClosedConnection);
+                            byte[] b = new byte[] { (byte)(code >> 8), (byte)(code & 0xFF) }; // Big-endian
+                            Send(b, Opcode.ClosedConnection);
                             SwitchState(State.Closing);
                         }
                         catch (ObjectDisposedException)
@@ -378,16 +410,45 @@ namespace websocket_server
             }
         }
 
+        /// <summary>
+        /// Close the Tcp client
+        /// </summary>
+        public void Close()
+        {
+            try
+            {
+                TcpClient.Close();
+            }
+            catch (ObjectDisposedException) { }
+        }
+
+        /// <summary>
+        /// Emitted when connected to receiver and ready to send message
+        /// </summary>
         public event EventHandler<ConnectEventArgs> ConnectEvent;
+
+        /// <summary>
+        /// Emitted when disconnected from receiver
+        /// </summary>
         public event EventHandler<DisconnectEventArgs> DisconnectEvent;
-        public event EventHandler<TextMessageEventArgs> Message;
+
+        /// <summary>
+        /// Emitted when a text message is received
+        /// </summary>
+        public event EventHandler<TextMessageEventArgs> TextMessage;
     }
 
     public class ConnectEventArgs : EventArgs 
     {
         public WebsocketConnection Client;
     }
-    public class DisconnectEventArgs : EventArgs { }
+    public class DisconnectEventArgs : EventArgs 
+    {
+        /// <summary>
+        /// Disconnect reason code. -1 for no code specified
+        /// </summary>
+        public int Code = -1;
+    }
     public class TextMessageEventArgs : EventArgs
     {
         /// <summary>

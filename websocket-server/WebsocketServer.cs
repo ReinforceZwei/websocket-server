@@ -111,7 +111,7 @@ namespace websocket_server
                 OnClientDisconnected?.Invoke(this, e);
             };
 
-            connection.Message += (s, e) => { OnTextMessage?.Invoke(this, e); };
+            connection.TextMessage += (s, e) => { OnTextMessage?.Invoke(this, e); };
 
             // Start websocket message
             connection.StartReceive();

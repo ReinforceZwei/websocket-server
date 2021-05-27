@@ -23,7 +23,7 @@ namespace websocket_server
             if (uri.Scheme != "ws" && uri.Scheme != "wss")
                 throw new NotSupportedException("Expected ws or wss URL, " + uri.Scheme + " found");
             connection = new WebsocketConnection(uri);
-            connection.Message += MessageHandler;
+            connection.TextMessage += MessageHandler;
             connection.DisconnectEvent += DisconnectHandler;
         }
 
